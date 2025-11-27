@@ -6,9 +6,10 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"bakeflow/models"
+
+	"github.com/gorilla/mux"
 )
 
 // AdminGetOrders returns all orders for admin dashboard
@@ -61,15 +62,9 @@ func AdminUpdateOrderStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get order ID from URL path
-	// URL format: /api/admin/orders/123/status
-	pathParts := strings.Split(r.URL.Path, "/")
-	if len(pathParts) < 5 {
-		http.Error(w, "Invalid URL", http.StatusBadRequest)
-		return
-	}
-
-	orderIDStr := pathParts[4]
+	// Get order ID from URL using gorilla/mux
+	vars := mux.Vars(r)
+	orderIDStr := vars["id"]
 	orderID, err := strconv.Atoi(orderIDStr)
 	if err != nil {
 		http.Error(w, "Invalid order ID", http.StatusBadRequest)

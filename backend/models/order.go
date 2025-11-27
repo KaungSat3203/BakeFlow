@@ -165,18 +165,34 @@ func GetOrderByID(orderID int) (*Order, error) {
 	query := `
 		SELECT id, customer_name, delivery_type, address, status, total_items,
 		       COALESCE(subtotal, 0), COALESCE(delivery_fee, 0), COALESCE(total_amount, 0),
-		       reordered_from, rating_id, COALESCE(sender_id, '') as sender_id, created_at, completed_at
+		       reordered_from, rating_id, COALESCE(sender_id, ''), created_at, completed_at
 		FROM orders
 		WHERE id = $1
 	`
 	
+	var reorderedFrom, ratingID sql.NullInt64
+	var completedAt sql.NullTime
+	
 	err := configs.DB.QueryRow(query, orderID).Scan(
 		&o.ID, &o.CustomerName, &o.DeliveryType, &o.Address, &o.Status, &o.TotalItems,
-		&o.Subtotal, &o.DeliveryFee, &o.TotalAmount, &o.ReorderedFrom, &o.RatingID, &o.SenderID,
-		&o.CreatedAt, &o.CompletedAt,
+		&o.Subtotal, &o.DeliveryFee, &o.TotalAmount, &reorderedFrom, &ratingID, &o.SenderID,
+		&o.CreatedAt, &completedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	
+	// Handle nullable fields
+	if reorderedFrom.Valid {
+		val := int(reorderedFrom.Int64)
+		o.ReorderedFrom = &val
+	}
+	if ratingID.Valid {
+		val := int(ratingID.Int64)
+		o.RatingID = &val
+	}
+	if completedAt.Valid {
+		o.CompletedAt = &completedAt.Time
 	}
 	
 	// Load items

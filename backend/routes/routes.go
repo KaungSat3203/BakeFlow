@@ -1,10 +1,13 @@
 package routes
 
 import (
+	"bakeflow/configs"
 	"bakeflow/controllers"
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/gorilla/mux"
 )
 
 // LoggingMiddleware logs all incoming requests (useful for debugging webhook issues)
@@ -25,7 +28,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		
 		// Handle preflight requests
@@ -39,18 +42,19 @@ func CORSMiddleware(next http.Handler) http.Handler {
 }
 
 func SetupRoutes() http.Handler {
-	mux := http.NewServeMux()
+	// Use gorilla/mux for better routing with path parameters
+	router := mux.NewRouter()
 
 	// Health check endpoint (useful for monitoring)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("BakeFlow Bot is running! ✅"))
-	})
+	}).Methods("GET")
 
 	// Messenger webhook endpoint
 	// GET: Facebook verification
 	// POST: Receive messages from users
-	mux.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			controllers.VerifyWebhook(w, r)
 		} else if r.Method == "POST" {
@@ -61,14 +65,43 @@ func SetupRoutes() http.Handler {
 	})
 
 	// Orders API
-	mux.HandleFunc("/orders", controllers.GetOrders)
+	router.HandleFunc("/orders", controllers.GetOrders).Methods("GET")
 	
-	// Admin API Routes
-	mux.HandleFunc("/api/admin/orders", controllers.AdminGetOrders)
-	mux.HandleFunc("/api/admin/orders/", controllers.AdminUpdateOrderStatus)
+	// Admin API Routes - Orders
+	router.HandleFunc("/api/admin/orders", controllers.AdminGetOrders).Methods("GET")
+	router.HandleFunc("/api/admin/orders/{id}/status", controllers.AdminUpdateOrderStatus).Methods("PUT", "OPTIONS")
+
+	// Admin API Routes - Products
+	productController := &controllers.ProductController{DB: configs.DB}
+	
+	// Product CRUD
+	router.HandleFunc("/api/products", productController.GetProducts).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/products", productController.CreateProduct).Methods("POST", "OPTIONS")
+
+	// Dev helper: Seed sample products if DB is empty (place BEFORE {id} routes to avoid conflicts)
+	router.HandleFunc("/api/products/seed", productController.SeedProducts).Methods("GET", "OPTIONS")
+
+	// Debug info for diagnosing product visibility
+	router.HandleFunc("/api/products/debug", productController.DebugProducts).Methods("GET", "OPTIONS")
+
+	// Use regex to ensure {id} is numeric, preventing collisions with static paths like /seed
+	router.HandleFunc("/api/products/{id:[0-9]+}", productController.GetProduct).Methods("GET", "OPTIONS")
+	router.HandleFunc("/api/products/{id:[0-9]+}", productController.UpdateProduct).Methods("PUT", "OPTIONS")
+	router.HandleFunc("/api/products/{id:[0-9]+}", productController.DeleteProduct).Methods("DELETE", "OPTIONS")
+	
+	// Product Status (numeric id)
+	router.HandleFunc("/api/products/{id:[0-9]+}/status", productController.UpdateProductStatus).Methods("PATCH", "OPTIONS")
+	
+	// Product Logs
+	router.HandleFunc("/api/products/{id}/logs", productController.GetProductLogs).Methods("GET", "OPTIONS")
+	
+	// Product Alerts
+	router.HandleFunc("/api/products/low-stock", productController.GetLowStockProducts).Methods("GET", "OPTIONS")
+
+	// (Moved above to avoid route conflicts)
 
 	// Wrap with middleware
-	handler := LoggingMiddleware(mux)
+	handler := LoggingMiddleware(router)
 	handler = CORSMiddleware(handler)
 
 	return handler
