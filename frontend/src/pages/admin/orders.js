@@ -106,8 +106,16 @@ export default function OrdersPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Status update handler (no optimistic change until backend confirms)
   const updateOrderStatus = async (orderId, newStatus) => {
+    // Prevent overlapping updates on same order and fast double-clicks
+    if (updating === orderId) return;
+    const prev = orders.find(o => o.id === orderId);
+    if (!prev) return;
+    const previousStatus = prev.status;
+
     setUpdating(orderId);
+
     try {
       const res = await fetch(`http://localhost:8080/api/admin/orders/${orderId}/status`, {
         method: 'PUT',
@@ -115,47 +123,47 @@ export default function OrdersPage() {
         body: JSON.stringify({ status: newStatus })
       });
       const data = await res.json().catch(() => ({}));
+
       if (res.ok && data.success) {
-        fetchOrders();
-        const notified = data.notification_sent;
+        // Update local UI only after backend success
+        setOrders(os => os.map(o => o.id === orderId ? { ...o, status: newStatus } : o));
         const baseMsg = `✅ Order #${orderId} updated to ${newStatus}.`;
-        const notiMsg = notified ? ' Customer notified.' : data.notification_error ? ` (No customer notification: ${data.notification_error})` : '';
-        setNotification({
-          show: true,
-          message: baseMsg + notiMsg,
-          type: 'success'
-        });
-        setTimeout(() => setNotification({ show: false, message: '', type: '' }), 6000);
+        let notiMsg = '';
+        if (data.notification_dispatched) notiMsg = ' (Customer notification queued)';
+        if (data.duplicate) notiMsg = ' (No change)';
+        setNotification({ show: true, message: baseMsg + notiMsg, type: 'success' });
+        setTimeout(() => setNotification({ show: false, message: '', type: '' }), 5000);
       } else {
+        // Keep previous status and show error
+        setOrders(os => os.map(o => o.id === orderId ? { ...o, status: previousStatus } : o));
         setNotification({
           show: true,
-          message: `❌ Failed to update order status${data.notification_error ? ' - ' + data.notification_error : ''}`,
+          message: `❌ Failed to update order #${orderId}${data.notification_error ? ' - ' + data.notification_error : ''}`,
           type: 'danger'
         });
       }
     } catch (e) {
       console.error(e);
-      setNotification({
-        show: true,
-        message: '❌ Error connecting to server',
-        type: 'danger'
-      });
+      // Keep previous status on network error
+      setOrders(os => os.map(o => o.id === orderId ? { ...o, status: previousStatus } : o));
+      setNotification({ show: true, message: '❌ Network error updating order', type: 'danger' });
     } finally {
       setUpdating(null);
     }
   };
 
+  // Exclude delivered orders from the main Orders page
   const filtered = useMemo(() => {
-    if (filter === 'all') return orders;
-    return orders.filter(o => o.status === filter);
+    const activeOrders = orders.filter(o => o.status !== 'delivered');
+    if (filter === 'all') return activeOrders;
+    return activeOrders.filter(o => o.status === filter);
   }, [orders, filter]);
 
   const filters = [
     { key: 'all', label: 'All', icon: 'grid' },
     { key: 'pending', label: 'Pending', icon: 'hourglass' },
     { key: 'preparing', label: 'Preparing', icon: 'egg-fried' },
-    { key: 'ready', label: 'Ready', icon: 'check-circle' },
-    { key: 'delivered', label: 'Delivered', icon: 'truck' }
+    { key: 'ready', label: 'Ready', icon: 'check-circle' }
   ];
 
   const getStatusSteps = (currentStatus) => {
@@ -237,6 +245,10 @@ export default function OrdersPage() {
                       </button>
                     ))}
                   </div>
+                  <div className="mt-3">
+                    <span className="text-muted small">Delivered orders are archived. View them in </span>
+                    <a href="/admin/orders/archive" className="small">Archive</a>.
+                  </div>
                 </div>
               </div>
 
@@ -263,7 +275,10 @@ export default function OrdersPage() {
                             <h5 className="mb-1 fw-bold">Order #{order.id}</h5>
                             <small className="text-muted"><i className="bi bi-clock me-1"></i>{new Date(order.created_at).toLocaleString()}</small>
                           </div>
-                          <span className={`badge bg-${statusColor(order.status)} px-3 py-2`}>{order.status.toUpperCase()}</span>
+                          <span className={`badge bg-${statusColor(order.status)} px-3 py-2`}>
+                            {order.status.toUpperCase()}
+                            {updating === order.id && <span className="ms-2 spinner-border spinner-border-sm" />}
+                          </span>
                         </div>
                       </div>
 

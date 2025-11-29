@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"bakeflow/models"
 
@@ -94,63 +95,100 @@ func AdminUpdateOrderStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update order status in database
+	// Load existing order to check current status & sender
+	currentOrder, err := models.GetOrderByID(orderID)
+	if err != nil {
+		log.Printf("❌ Failed to load order #%d before update: %v", orderID, err)
+		http.Error(w, "Order not found", http.StatusNotFound)
+		return
+	}
+
+	// Validate allowed status transition (no skipping)
+	allowedNext := map[string]string{
+		"pending":   "preparing",
+		"preparing": "ready",
+		"ready":     "delivered",
+		"delivered": "",
+	}
+	if next, ok := allowedNext[currentOrder.Status]; !ok {
+		http.Error(w, "Invalid current status", http.StatusBadRequest)
+		return
+	} else {
+		if next == "" {
+			// Already delivered; cannot advance further
+			resp := map[string]interface{}{"success": true, "duplicate": true, "order_id": orderID, "status": currentOrder.Status, "message": "Order already delivered"}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		if requestBody.Status != next {
+			http.Error(w, fmt.Sprintf("Invalid transition: %s -> %s", currentOrder.Status, requestBody.Status), http.StatusBadRequest)
+			return
+		}
+	}
+
+	if currentOrder.Status == requestBody.Status {
+		// Duplicate / idempotent update; respond quickly
+		resp := map[string]interface{}{
+			"success":   true,
+			"duplicate": true,
+			"order_id":  orderID,
+			"status":    currentOrder.Status,
+			"message":   "Status unchanged",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// Perform DB update (prevent duplicate race by using current different status)
 	err = models.UpdateOrderStatus(orderID, requestBody.Status)
 	if err != nil {
 		log.Printf("❌ Error updating order status: %v", err)
 		http.Error(w, "Error updating order status", http.StatusInternalServerError)
 		return
 	}
-
 	log.Printf("✅ Order #%d status updated to: %s", orderID, requestBody.Status)
 
-	// Prepare notification feedback
-	notificationSent := false
-	notificationError := ""
-
-	// Get order details to send notification to customer
-	order, err := models.GetOrderByID(orderID)
-	if err != nil {
-		log.Printf("⚠️ Could not load order for notification: %v", err)
-		notificationError = "load_failed"
-	} else if order.SenderID == "" {
-		log.Printf("ℹ️ No SenderID stored for order #%d; skipping customer notification", orderID)
-		notificationError = "missing_sender_id"
-	} else {
-		// Send status update message to customer (only for selected statuses)
-		statusMessages := map[string]string{
-			"pending":   "✅ Your order #%d has been received! We'll start preparing it soon.", // Added pending acknowledgement
-			"preparing": "🍰 Great news! We've started preparing your order #%d. It will be ready soon!",
-			"ready":     "✅ Your order #%d is ready! Please come pick it up or wait for delivery.",
-			"delivered": "🎉 Your order #%d has been delivered! Enjoy your delicious treats!",
-		}
-
-		if message, exists := statusMessages[requestBody.Status]; exists {
-			notificationText := fmt.Sprintf(message, orderID)
-			if err := SendMessage(order.SenderID, notificationText); err != nil {
-				log.Printf("⚠️ Failed to send notification to customer: %v", err)
-				notificationError = err.Error()
-			} else {
-				log.Printf("📬 Status notification sent to customer for order #%d", orderID)
-				notificationSent = true
-			}
-		} else {
-			// Status not mapped for notifications
-			log.Printf("ℹ️ Status '%s' not configured for notifications", requestBody.Status)
-			notificationError = "status_not_configured"
-		}
+	// Respond immediately before potentially slow external notification
+	resp := map[string]interface{}{
+		"success":   true,
+		"order_id":  orderID,
+		"new_status": requestBody.Status,
+		"message":   "Order status updated",
+		"notification_dispatched": currentOrder.SenderID != "", // whether we'll attempt notification
 	}
-
-	// Return success response with notification metadata
-	response := map[string]interface{}{
-		"success":            true,
-		"message":            "Order status updated successfully",
-		"order_id":           orderID,
-		"new_status":         requestBody.Status,
-		"notification_sent":  notificationSent,
-		"notification_error": notificationError,
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(resp)
+
+	// Async notification (non-blocking)
+	if currentOrder.SenderID != "" {
+		go func(orderID int, senderID, status string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("⚠️ Panic recovered in notification goroutine for order #%d: %v", orderID, r)
+				}
+			}()
+			statusMessages := map[string]string{
+				"pending":   "✅ Your order #%d has been received! We'll start preparing it soon.",
+				"preparing": "🍰 Great news! We've started preparing your order #%d. It will be ready soon!",
+				"ready":     "✅ Your order #%d is ready! Please come pick it up or wait for delivery.",
+				"delivered": "🎉 Your order #%d has been delivered! Enjoy your delicious treats!",
+			}
+			if msgTemplate, ok := statusMessages[status]; ok {
+				text := fmt.Sprintf(msgTemplate, orderID)
+				if err := SendMessage(senderID, text); err != nil {
+					log.Printf("⚠️ Failed to send async notification for order #%d: %v", orderID, err)
+				} else {
+					log.Printf("📬 Async status notification queued for order #%d", orderID)
+				}
+			} else {
+				log.Printf("ℹ️ Status '%s' not configured for notifications (order #%d)", status, orderID)
+			}
+			// Optional: small delay to avoid hammering external service bursts (tunable)
+			time.Sleep(10 * time.Millisecond)
+		}(orderID, currentOrder.SenderID, requestBody.Status)
+	} else {
+		log.Printf("ℹ️ No SenderID for order #%d; skipping async notification", orderID)
+	}
 }
